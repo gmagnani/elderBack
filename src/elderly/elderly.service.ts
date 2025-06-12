@@ -25,23 +25,21 @@ export class ElderlyService {
   async create(data: CreateElderlyDto) {
     const sanitizedData = {
       ...data,
-      cpf: data.cpf.replace(/\D/g, ''), // Remove caracteres não numéricos
+      cpf: data.cpf.replace(/\D/g, ''),
       phone: data.phone.replace(/\D/g, ''),
     };
 
-    // 🔹 Criar endereço do idoso *fora* da transação
     const address = await this.addressService.create(sanitizedData.address);
 
     const birthDate = new Date(sanitizedData.dateOfBirth);
     if (isNaN(birthDate.getTime())) {
-      throw new Error('Data de nascimento inválida');
+      throw new BadRequestException('Data de nascimento inválida.');
     }
 
-    // 🔹 Criar endereços dos contatos *antes* da transação
     const contactsWithAddresses = await Promise.all(
       sanitizedData.contacts.map(async (contact) => {
         if (!contact.address) {
-          throw new Error('Contact address is required');
+          throw new BadRequestException('Endereço do contato é obrigatório.');
         }
         const contactAddress = await this.addressService.create(
           contact.address,
@@ -51,7 +49,6 @@ export class ElderlyService {
     );
 
     return this.prisma.$transaction(async (tx) => {
-      // 🔹 Verificar se o CPF já está cadastrado
       const existingUser = await tx.user.findUnique({
         where: { login: sanitizedData.cpf },
       });
@@ -61,7 +58,6 @@ export class ElderlyService {
 
       const hashedPassword = await bcrypt.hash(sanitizedData.cpf, 10);
 
-      // 🔹 Criar usuário e idoso juntos para reduzir queries
       const user = await tx.user.create({
         data: {
           login: sanitizedData.cpf,
@@ -90,9 +86,7 @@ export class ElderlyService {
         },
       });
 
-      // 🔹 Criar contatos um por um dentro da transação
       for (const contact of contactsWithAddresses) {
-        // 🔹 Verifica se o contato já existe
         let newContact = await tx.contact.findUnique({
           where: { cpf: contact.cpf },
         });
@@ -107,7 +101,6 @@ export class ElderlyService {
           });
         }
 
-        // 🔹 Associar contato ao idoso
         await tx.elderlyContact.create({
           data: { elderlyId: elderly.id, contactId: newContact.id },
         });
@@ -159,7 +152,7 @@ export class ElderlyService {
     if (data.contacts && data.contacts.length > 0) {
       for (const contact of data.contacts) {
         if (!contact.cpf) {
-          throw new Error('CPF do contato é obrigatório');
+          throw new BadRequestException('CPF do contato é obrigatório.');
         }
         await this.contactService.update(contact.cpf, contact);
       }
@@ -195,15 +188,17 @@ export class ElderlyService {
   }
 
   async delete(id: string) {
-    const elderly = await this.findOne(id);
+    const elderlyData = await this.findOne(id);
 
-    await this.prisma.elderlyContact.deleteMany({ where: { elderlyId: id } });
+    return this.prisma.$transaction(async (tx) => {
+      await tx.elderlyContact.deleteMany({ where: { elderlyId: id } });
 
-    await this.prisma.elderly.delete({ where: { id } });
+      await tx.elderly.delete({ where: { id } });
 
-    await this.userService.delete(elderly.userId);
+      await this.userService.delete(elderlyData.userId);
 
-    return { message: 'Elderly deleted successfully' };
+      return { message: 'Idoso excluído com sucesso.' };
+    });
   }
 
   async validateIdentity(data: ValidateElderlyDto) {

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-argument */
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import { Injectable, Logger } from '@nestjs/common';
@@ -7,6 +6,7 @@ import { PrismaService } from 'src/database/prisma.service';
 import { CreateQuestionDto } from './dto/create-question.dto';
 import { UpdateQuestionDto } from './dto/update-question.dto';
 import { RuleService } from 'src/rule/rule.service';
+import { CreateRuleDto } from 'src/rule/dto/create-rule.dto';
 
 @Injectable()
 export class QuestionService {
@@ -17,13 +17,15 @@ export class QuestionService {
     private ruleService: RuleService,
   ) {}
 
-  private areAllRuleFieldsNull(ruleDto: any): boolean {
-    if (!ruleDto || typeof ruleDto !== 'object') {
-      return true; // Considera não objeto ou nulo como "todos os campos nulos"
+  private areAllRuleFieldsNull(
+    ruleDto: Partial<CreateRuleDto> | null | undefined,
+  ): boolean {
+    if (!ruleDto || typeof ruleDto !== 'object' || ruleDto === null) {
+      return true;
     }
     const values = Object.values(ruleDto);
     if (values.length === 0) {
-      return true; // Considera objeto vazio como "todos os campos nulos"
+      return true;
     }
     return values.every((value) => value === null);
   }
@@ -34,38 +36,35 @@ export class QuestionService {
     );
     let ruleIdToLink: string | undefined = undefined;
 
-    // Verifica se data.rule existe e se não tem todos os seus valores como null
     if (data.rule) {
       if (!this.areAllRuleFieldsNull(data.rule)) {
+        const ruleToCreate: CreateRuleDto = data.rule;
         this.logger.debug(
-          `Rule data provided and is not all nulls. Attempting to create rule: ${JSON.stringify(data.rule)}`,
+          `Rule data provided and is not all nulls. Attempting to create rule: ${JSON.stringify(ruleToCreate)}`,
         );
         try {
-          const createdRule = await this.ruleService.create(data.rule);
-          // Verifica se a regra foi criada com sucesso e possui um ID.
+          const createdRule = await this.ruleService.create(ruleToCreate);
+
           if (createdRule && createdRule.id) {
             ruleIdToLink = createdRule.id;
             this.logger.debug(
               `Rule created successfully with ID: ${ruleIdToLink}`,
             );
           } else if (createdRule) {
-            // Caso a ruleService retorne um objeto de regra, mas sem ID (cenário inesperado).
             this.logger.warn(
-              `Rule service returned a rule object without an ID for rule data: ${JSON.stringify(data.rule)}. Question: '${data.title}'. Proceeding without linking rule.`,
+              `Rule service returned a rule object without an ID for rule data: ${JSON.stringify(ruleToCreate)}. Question: '${data.title}'. Proceeding without linking rule.`,
             );
           } else {
-            // ruleService.create retornou null/undefined, o que significa que a regra não pôde ser criada
             this.logger.log(
-              `Rule service returned null/undefined for rule data: ${JSON.stringify(data.rule)}. Question: '${data.title}'. Proceeding without linking rule.`,
+              `Rule service returned null/undefined for rule data: ${JSON.stringify(ruleToCreate)}. Question: '${data.title}'. Proceeding without linking rule.`,
             );
           }
         } catch (error) {
           this.logger.error(
-            `Error creating rule for question '${data.title}' with rule data ${JSON.stringify(data.rule)}: ${error.message}`,
-            error.stack,
+            `Error creating rule for question '${data.title}' with rule data ${JSON.stringify(ruleToCreate)}: ${error instanceof Error ? error.message : String(error)}`,
+            error instanceof Error ? error.stack : undefined,
           );
-          // Re-lança o erro, pois um erro durante a criação da regra (que não seja ela retornar null)
-          // provavelmente é algo que o chamador deve saber (ex: erro de banco de dados, validação mais séria).
+
           throw error;
         }
       } else {
@@ -74,9 +73,7 @@ export class QuestionService {
         );
       }
     }
-    // Se data.rule não foi fornecido, ruleIdToLink já é undefined.
 
-    // Constrói o payload para a criação da questão
     const questionCreateInput: Prisma.QuestionCreateInput = {
       title: data.title,
       description: data.description,
@@ -105,10 +102,10 @@ export class QuestionService {
     this.logger.log(
       `Creating question with final input: ${JSON.stringify(questionCreateInput)}`,
     );
-    // Cria a questão no banco de dados
+
     const createdQuestion = await this.prisma.question.create({
       data: questionCreateInput,
-      include: { options: true, rule: true }, // Inclui rule para consistência
+      include: { options: true, rule: true },
     });
     this.logger.log(
       `Question created successfully with ID: ${createdQuestion.id}`,
@@ -117,7 +114,7 @@ export class QuestionService {
   }
 
   async findAll(search?: string) {
-    return await this.prisma.question.findMany({
+    return this.prisma.question.findMany({
       where: search
         ? {
             OR: [
@@ -126,37 +123,91 @@ export class QuestionService {
             ],
           }
         : undefined,
-      include: { options: true, rule: true }, // <-- Adicione esta linha
+      orderBy: {
+        created: 'desc',
+      },
+      include: { options: true, rule: true },
     });
   }
 
   async findOne(id: string) {
-    return await this.prisma.question.findUnique({
+    return this.prisma.question.findUnique({
       where: { id },
       include: { options: true, rule: true },
     });
   }
 
   async update(id: string, data: UpdateQuestionDto) {
-    // Separa os campos de atualização da questão dos dados de opções, se existirem
-    const { options, rule, ...questionData } = data;
+    const { options, rule: ruleInput, ...questionDataToUpdate } = data;
 
-    return await this.prisma.$transaction(async (tx) => {
-      // Atualiza os campos básicos da questão
+    return this.prisma.$transaction(async (tx) => {
+      const updatePayload: Prisma.QuestionUpdateInput = {
+        ...questionDataToUpdate,
+      };
+      let shouldManageRuleRelation = false;
 
-      const updatedQuestion = await tx.question.update({
+      if (ruleInput === null) {
+        updatePayload.rule = { disconnect: true };
+        shouldManageRuleRelation = true;
+        this.logger.debug(
+          `Attempting to disconnect rule from question ID: ${id}`,
+        );
+      } else if (ruleInput && typeof ruleInput === 'object') {
+        if (!this.areAllRuleFieldsNull(ruleInput)) {
+          shouldManageRuleRelation = true;
+
+          const ruleDtoWithOptionalId = ruleInput as Partial<CreateRuleDto> & {
+            id?: string;
+          };
+
+          if (ruleDtoWithOptionalId.id) {
+            this.logger.debug(
+              `Attempting to update rule ID: ${ruleDtoWithOptionalId.id} for question ID: ${id}`,
+            );
+            const { id: ruleId, ...ruleDataToUpdate } = ruleDtoWithOptionalId;
+
+            const updatedRule = await this.ruleService.update(
+              ruleId,
+              ruleDataToUpdate as any /*, tx */,
+            );
+            updatePayload.rule = { connect: { id: updatedRule.id } };
+            this.logger.debug(
+              `Rule ID: ${updatedRule.id} updated and connected to question ID: ${id}`,
+            );
+          } else {
+            this.logger.debug(
+              `Attempting to create and connect new rule for question ID: ${id}`,
+            );
+
+            const { id: _id, ...ruleDataToCreate } = ruleDtoWithOptionalId;
+            const createdRule = await this.ruleService.create(
+              ruleDataToCreate as CreateRuleDto /*, tx */,
+            );
+            updatePayload.rule = { connect: { id: createdRule.id } };
+            this.logger.debug(
+              `New rule ID: ${createdRule.id} created and connected to question ID: ${id}`,
+            );
+          }
+        } else {
+          this.logger.debug(
+            `Rule data provided for question ID: ${id} but all fields were null. No rule operation performed.`,
+          );
+        }
+      }
+
+      await tx.question.update({
         where: { id },
-        data: questionData,
-        include: { options: true },
+        data: updatePayload,
       });
 
-      // Se houver opções no DTO, atualizamos a relação
       if (options) {
-        // Exclui todas as opções atuais
         await tx.option.deleteMany({
           where: { questionId: id },
         });
-        // Cria as novas opções
+        this.logger.debug(
+          `Deleted existing options for question ID: ${id}. Creating ${options.length} new options.`,
+        );
+
         await Promise.all(
           options.map((option) =>
             tx.option.create({
@@ -168,25 +219,32 @@ export class QuestionService {
             }),
           ),
         );
-        // Retorna a questão com as opções atualizadas
-        return await tx.question.findUnique({
-          where: { id },
-          include: { options: true },
-        });
       }
 
-      return updatedQuestion;
+      const finalQuestion = await tx.question.findUnique({
+        where: { id },
+        include: { options: true, rule: true },
+      });
+      this.logger.log(`Question ID: ${id} updated successfully.`);
+      return finalQuestion;
     });
   }
 
   async remove(id: string) {
-    await this.prisma.option.deleteMany({
-      where: { questionId: id },
+    return this.prisma.$transaction(async (tx) => {
+      this.logger.debug(
+        `Attempting to remove question ID: ${id} and its options.`,
+      );
+      await tx.option.deleteMany({
+        where: { questionId: id },
+      });
+      await tx.question.delete({
+        where: { id },
+      });
+      this.logger.log(
+        `Question ID: ${id} and its options removed successfully.`,
+      );
+      return { message: 'Questão removida com sucesso!' };
     });
-    await this.prisma.question.delete({
-      where: { id },
-    });
-
-    return { message: 'Questão removida com sucesso!' };
   }
 }

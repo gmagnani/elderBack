@@ -7,7 +7,9 @@ import { PrismaService } from 'src/database/prisma.service';
 import * as bcrypt from 'bcrypt';
 import { CreateProfessionalDto } from './dto/create-professional.dto';
 import { UpdateProfessionalDto } from './dto/update-professional.dto';
-import { UserType } from '@prisma/client';
+import { UserType, Prisma } from '@prisma/client';
+
+const BCRYPT_SALT_ROUNDS = 10;
 
 @Injectable()
 export class ProfessionalService {
@@ -15,11 +17,10 @@ export class ProfessionalService {
 
   async create(data: CreateProfessionalDto) {
     return this.prisma.$transaction(async (tx) => {
-      // Verifica se o CPF já está cadastrado para evitar erro
       const sanitizedData = {
         ...data,
         cpf: data.cpf.replace(/\D/g, ''),
-        phone: data.phone.replace(/\D/g, ''), // Remove qualquer caractere que não seja número
+        phone: data.phone.replace(/\D/g, ''),
       };
       const existingUser = await tx.user.findUnique({
         where: { login: sanitizedData.cpf },
@@ -29,9 +30,11 @@ export class ProfessionalService {
         throw new BadRequestException('Este CPF já está cadastrado.');
       }
 
-      const hashedPassword = await bcrypt.hash(sanitizedData.cpf, 10);
+      const hashedPassword = await bcrypt.hash(
+        sanitizedData.cpf,
+        BCRYPT_SALT_ROUNDS,
+      );
 
-      // Cria o usuário antes do idoso
       const user = await tx.user.create({
         data: {
           login: sanitizedData.cpf,
@@ -80,27 +83,61 @@ export class ProfessionalService {
   }
 
   async update(id: string, data: UpdateProfessionalDto) {
-    return this.prisma.professional.update({
-      where: { id },
-      data,
-      include: { user: true },
+    const { name, email, phone, ...otherProfessionalData } = data;
+
+    const dataToUpdateProfessional: Prisma.ProfessionalUpdateInput = {
+      ...otherProfessionalData,
+    };
+    if (name) dataToUpdateProfessional.name = name;
+    if (email) dataToUpdateProfessional.email = email;
+    if (phone) dataToUpdateProfessional.phone = phone.replace(/\D/g, '');
+
+    return this.prisma.$transaction(async (tx) => {
+      const professionalExists = await tx.professional.findUnique({
+        where: { id },
+      });
+
+      if (!professionalExists) {
+        throw new NotFoundException('Profissional não encontrado');
+      }
+
+      const updatedProfessional = await tx.professional.update({
+        where: { id },
+        data: dataToUpdateProfessional,
+      });
+
+      const userDataToUpdate: Prisma.UserUpdateInput = {};
+      if (name) userDataToUpdate.name = name;
+      if (email) userDataToUpdate.email = email;
+
+      if (Object.keys(userDataToUpdate).length > 0) {
+        await tx.user.update({
+          where: { id: professionalExists.userId },
+          data: userDataToUpdate,
+        });
+      }
+
+      return tx.professional.findUnique({
+        where: { id: updatedProfessional.id },
+        include: { user: true },
+      });
     });
   }
 
   async remove(id: string) {
-    const professional = await this.prisma.professional.findUnique({
-      where: { id },
-      include: { user: true },
+    return this.prisma.$transaction(async (tx) => {
+      const professional = await tx.professional.findUnique({
+        where: { id },
+      });
+
+      if (!professional) {
+        throw new NotFoundException('Profissional não encontrado');
+      }
+
+      await tx.professional.delete({ where: { id } });
+      await tx.user.delete({ where: { id: professional.userId } });
+
+      return { message: 'Professional deleted successfully' };
     });
-
-    if (!professional) {
-      throw new NotFoundException('Profissional não encontrado');
-    }
-
-    await this.prisma.professional.delete({ where: { id } });
-
-    await this.prisma.user.delete({ where: { id: professional.userId } });
-
-    return { message: 'Professional deleted successfully' };
   }
 }
