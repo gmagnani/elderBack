@@ -28,24 +28,59 @@ export class AuthService {
     throw new UnauthorizedException('Credenciais inválidas');
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await
   async login(user: User) {
-    const payload = {
-      sub: user.id,
-      login: user.login,
-      userType: user.userType,
-      name: user.name,
-    };
-    console.log('Gerando token para:', payload);
-    if (user.mustChangePassword) {
+    if (user.userType === 'USER') {
+      const elderly = await this.prisma.elderly.findUnique({
+        where: { userId: user.id },
+        select: { id: true },
+      });
+      if (!elderly) {
+        throw new BadRequestException(
+          'Elderly record not found for this user.',
+        );
+      }
+      const payload = {
+        sub: user.id,
+        login: user.login,
+        userType: user.userType,
+        name: user.name,
+        elderlyId: elderly?.id,
+      };
+      if (user.mustChangePassword) {
+        return {
+          message: 'ALTER_PASSWORD_REQUIRED',
+          userId: user.id, // Retorna o ID para alterar a senha depois
+        };
+      }
+      const access_token = this.jwtService.sign(payload);
       return {
-        message: 'ALTER_PASSWORD_REQUIRED',
-        userId: user.id, // Retorna o ID para alterar a senha depois
+        access_token,
+        cpf: user.login,
+        elderlyId: elderly?.id,
+      };
+    } else {
+      const payload = {
+        sub: user.id,
+        login: user.login,
+        userType: user.userType,
+        name: user.name,
+      };
+      if (user.mustChangePassword) {
+        return {
+          message: 'ALTER_PASSWORD_REQUIRED',
+          userId: user.id, // Retorna o ID para alterar a senha depois
+        };
+      }
+      const access_token = this.jwtService.sign(payload);
+      const professional = await this.prisma.professional.findUnique({
+        where: { userId: user.id },
+        select: { id: true },
+      });
+      return {
+        access_token,
+        professionalId: professional?.id,
       };
     }
-    return {
-      access_token: this.jwtService.sign(payload),
-    };
   }
 
   async forgotPassword(login: string) {
@@ -67,7 +102,7 @@ export class AuthService {
     if (!user.email) {
       throw new BadRequestException('Usuário não possui um e-mail válido');
     }
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
+
     await this.mailService.sendPasswordReset(user.email, resetToken);
 
     return { message: 'E-mail de recuperação enviado' };
