@@ -14,9 +14,11 @@ import { AddFormAnswareDto } from './dto/add-form-answare.dto';
 import { Prisma, Elderly } from '@prisma/client';
 import { PauseEvaluationAnswareDto } from './dto/pause-evaluation-answare.dto';
 
+import { ImageStorageService } from 'src/image-storage/image-storage.service';
 export interface FormScoreHistory {
   formId: string;
   formTitle: string;
+  formType: string; // Opcional, se necessário
   scores: {
     evaluationAnswareId: string;
     date: Date;
@@ -30,6 +32,7 @@ export class EvaluationAnswareService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ruleEngine: RuleEngineService,
+    private readonly imageStorageService: ImageStorageService,
   ) {}
 
   /**
@@ -498,6 +501,29 @@ export class EvaluationAnswareService {
       const score =
         scores.questionScores.get(questionAnswareDto.questionId) ?? 0;
 
+      // Handle image upload if answerImage is provided and is a base64 string
+      let savedImagePath: string | undefined = questionAnswareDto.answerImage;
+      if (
+        questionAnswareDto.answerImage &&
+        questionAnswareDto.answerImage.startsWith('data:image/')
+      ) {
+        try {
+          const result = await this.imageStorageService.saveBase64Image(
+            questionAnswareDto.answerImage,
+            `question-${questionAnswareDto.questionId}`, // Optional prefix for filename
+          );
+          savedImagePath = result.filePath;
+        } catch (error) {
+          console.error(
+            `Failed to save image for question ${questionAnswareDto.questionId}:`,
+            error,
+          );
+          throw new BadRequestException(
+            `Erro ao processar imagem para a questão ${questionAnswareDto.questionId}.`,
+          );
+        }
+      }
+
       const createdQuestionAnswer = await tx.questionAnswer.create({
         data: {
           questionId: questionAnswareDto.questionId,
@@ -505,8 +531,8 @@ export class EvaluationAnswareService {
           score,
           answerText: questionAnswareDto.answerText,
           answerNumber: questionAnswareDto.answerNumber,
-          answerBoolean: questionAnswareDto.answerBoolean,
-          answerImage: questionAnswareDto.answerImage,
+          answerBoolean: questionAnswareDto.answerBoolean, // Use the potentially saved path
+          answerImage: savedImagePath,
           selectedOptionId: questionAnswareDto.selectedOptionId,
         },
       });
@@ -704,7 +730,7 @@ export class EvaluationAnswareService {
         formAnswares: {
           orderBy: { created: 'asc' }, // Ordena as respostas de formulário pela data de criação
           include: {
-            form: { select: { id: true, title: true } }, // Seleciona detalhes do formulário
+            form: { select: { id: true, title: true, type: true } }, // Seleciona detalhes do formulário
           },
         },
       },
@@ -716,10 +742,11 @@ export class EvaluationAnswareService {
     for (const evaluation of evaluations) {
       for (const formAnsware of evaluation.formAnswares) {
         const formId = formAnsware.formId;
-        const formTitle = formAnsware.form.title;
+        const formTitle = formAnsware.form.title ?? '';
+        const formType = formAnsware.form.type ?? ''; // Obtém o tipo do formulário
 
         if (!historyMap.has(formId)) {
-          historyMap.set(formId, { formId, formTitle, scores: [] });
+          historyMap.set(formId, { formId, formTitle, formType, scores: [] });
         }
 
         historyMap.get(formId)?.scores.push({
@@ -737,6 +764,36 @@ export class EvaluationAnswareService {
     );
 
     return result;
+  }
+
+  /**
+   * Retorna as pontuações totais das respostas de formulário para um idoso,
+   * filtradas pelo tipo de formulário (título) do formulário enviado.
+   */
+  async getElderlyFormScoresByType(
+    elderlyId: string,
+    formId: string,
+  ): Promise<FormScoreHistory[]> {
+    // 1. Obter o título do formulário (que representa o "tipo" do formulário)
+    const targetForm = await this.prisma.form.findUnique({
+      where: { id: formId },
+      select: { type: true },
+    });
+
+    if (!targetForm) {
+      throw new NotFoundException(
+        `Formulário com ID ${formId} não encontrado.`,
+      );
+    }
+
+    const targetFormType = targetForm.type;
+
+    // 2. Obter o histórico completo de pontuações do idoso e filtrar pelo título do formulário
+    const allFormsHistory = await this.getElderlyFormsScoresHistory(elderlyId);
+
+    return allFormsHistory.filter(
+      (history) => history.formType === targetFormType,
+    );
   }
 
   async remove(id: string) {
